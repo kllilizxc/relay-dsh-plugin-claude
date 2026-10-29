@@ -1,0 +1,5 @@
+# Source and build provenance
+
+This compatibility snapshot is based on the public upstream `yangbobo2021/relay-dsh-plugin-claude` commit `a84e0872e965b99257f209f2abec6ab31133fae2`. It targets DSH 0.2.1-rc.2 and React 19.3.0, updates the session selection and import interfaces, and bundles the fixed public session-import release. The development-peer preparation script comes from the public Codex plugin commit `e0aa8be0c9d75acb5a57ba516ccc1dce155d5a36`. The upstream MIT license is retained. Upstream validation recordings and automatic npm publishing workflows are omitted.
+
+Build with Node 24.14.1 and npm 11.11.0, the committed npm lock, and prepared public DSH 0.2.1-rc.2 checkout `687f282e8625c6b8d11ff58211a90524be2e4317`. Run `npm ci --ignore-scripts --strict-peer-deps`, then `DSH_ROOT=<official-checkout> npm run build` and `npm pack --ignore-scripts`. The release tarball is a normal npm pack of this tree and omits source maps.

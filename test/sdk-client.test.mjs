@@ -1,0 +1,670 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+
+import { ClaudeSdkClient } from "../sdk-client.mjs";
+
+test("Claude SDK discovers and reads native Sessions through public Workspace APIs", async () => {
+  const calls = [];
+  const sdk = {
+    query() {},
+    async listSessions(options) {
+      calls.push(["list", options]);
+      return [{ sessionId: "native-1", cwd: "/workspace/relay", summary: "Existing work", lastModified: 1234 }];
+    },
+    async getSessionInfo(sessionId, options) {
+      calls.push(["info", sessionId, options]);
+      return { sessionId, cwd: options.dir, summary: "Existing work", lastModified: 1234 };
+    },
+    async getSessionMessages(sessionId, options) {
+      calls.push(["messages", sessionId, options]);
+      return [{ type: "user", uuid: "message-1", session_id: sessionId, parent_tool_use_id: null, message: { content: [] } }];
+    },
+  };
+  const client = new ClaudeSdkClient({ sdk });
+  await client.start();
+
+  assert.equal(client.supportsSessionImport(), true);
+  assert.deepEqual(await client.listWorkspaceSessions({ cwd: "/workspace/relay" }), [{
+    sessionId: "native-1", cwd: "/workspace/relay", summary: "Existing work", lastModified: 1234,
+  }]);
+  assert.equal((await client.readSession("native-1", { cwd: "/workspace/relay" })).messages.length, 1);
+  assert.deepEqual(calls, [
+    ["list", { dir: "/workspace/relay", includeWorktrees: false, includeProgrammatic: false }],
+    ["info", "native-1", { dir: "/workspace/relay" }],
+    ["messages", "native-1", { dir: "/workspace/relay" }],
+  ]);
+});
+
+test("Claude SDK fails closed when native Session APIs are unavailable", async () => {
+  const client = new ClaudeSdkClient({ sdk: { query() {} } });
+  await client.start();
+  assert.equal(client.supportsSessionImport(), false);
+  await assert.rejects(client.listWorkspaceSessions({ cwd: "/workspace/relay" }), {
+    code: "CLAUDE_SESSION_IMPORT_UNAVAILABLE",
+  });
+});
+
+test("the search-tool specification matches the SDK availability contract", async () => {
+  const specification = await readFile(
+    new URL("../docs/spec/claude-search-tools.md", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(specification, /opt into `Glob` and `Grep` through the SDK's\s+`allowedTools` option/);
+  assert.match(specification, /must never replace an\s+`mcp__dsh__\*` entry/);
+  assert.match(specification, /no Bash fallback, approval,\s+or workspace mutation/);
+  assert.match(specification, /auto-approve only these two native,\s+read-only search tools/);
+});
+
+test("the tool-output redaction specification matches the SDK persistence contract", async () => {
+  const specification = await readFile(
+    new URL("../docs/spec/claude-tool-output-redaction.md", import.meta.url),
+    "utf8",
+  );
+  const normalized = specification.replace(/\s+/g, " ");
+
+  assert.match(normalized, /resolve the effective Claude settings before every new or resumed turn/);
+  assert.match(normalized, /synchronous SDK `PostToolUse` callback/);
+  assert.match(normalized, /must not return `updatedToolOutput` when no configured value occurs/);
+  assert.match(normalized, /SDK activity and the native Claude JSONL transcript/);
+  assert.match(normalized, /does not rewrite user prompts/);
+});
+
+test("Claude SDK redacts sensitive effective environment values on new and resumed turns", async () => {
+  const fakeSecret = "CLD_ENV003_FAKE_SECRET_33003_X7Q9";
+  const explicitCredential = "CLD_ENV003_EXPLICIT_CREDENTIAL_33003";
+  const options = [];
+  const settingsRequests = [];
+  const sdk = {
+    async resolveSettings(request) {
+      settingsRequests.push(request);
+      return {
+        effective: {
+          env: {
+            CLD_ENV003_SECRET: fakeSecret,
+            CUSTOM_LOGIN: explicitCredential,
+            RELAY_VISIBLE_VALUE: "ordinary-value",
+            RELAY_API_KEY: "overlap-long",
+            RELAY_TOKEN: "overlap",
+            A_SHARED_SECRET: "duplicate-sensitive-value",
+            Z_SHARED_TOKEN: "duplicate-sensitive-value",
+          },
+          sandbox: {
+            credentials: {
+              envVars: [{ name: "CUSTOM_LOGIN", mode: "deny" }],
+            },
+          },
+        },
+      };
+    },
+    query(params) {
+      options.push(params.options);
+      return queryObject(async function* () {
+        yield {
+          type: "result",
+          session_id: params.options.sessionId ?? params.options.resume,
+          uuid: `result-${options.length}`,
+          subtype: "success",
+          is_error: false,
+          result: "done",
+        };
+      });
+    },
+  };
+  const client = new ClaudeSdkClient({ sdk });
+  await client.start();
+  const session = await client.createSession({
+    sessionId: "14141414-1414-4414-8414-141414141414",
+    cwd: "/workspace/relay",
+    settingSources: ["project"],
+  });
+  const activity = [];
+  client.on("activity", message => activity.push(message));
+
+  await client.sendMessage(session.id, { text: "first" });
+  await untilTurnCount(activity, 1);
+  await client.sendMessage(session.id, { text: "second" });
+  await untilTurnCount(activity, 2);
+
+  assert.deepEqual(settingsRequests, [
+    { cwd: "/workspace/relay", settingSources: ["project"] },
+    { cwd: "/workspace/relay", settingSources: ["project"] },
+  ]);
+  assert.equal(options[0].sessionId, session.id);
+  assert.equal(options[1].resume, session.id);
+  for (const option of options) {
+    const hook = option.hooks.PostToolUse[0].hooks[0];
+    const changed = await hook({
+      tool_response: {
+        stdout: `prefix ${fakeSecret} suffix`,
+        nested: [
+          explicitCredential,
+          { visible: "ordinary-value" },
+          "overlap-long overlap duplicate-sensitive-value",
+        ],
+      },
+    });
+    assert.deepEqual(changed, {
+      continue: true,
+      hookSpecificOutput: {
+        hookEventName: "PostToolUse",
+        updatedToolOutput: {
+          stdout: "prefix [REDACTED_ENV:CLD_ENV003_SECRET] suffix",
+          nested: [
+            "[REDACTED_ENV:CUSTOM_LOGIN]",
+            { visible: "ordinary-value" },
+            "[REDACTED_ENV:RELAY_API_KEY] [REDACTED_ENV:RELAY_TOKEN] [REDACTED_ENV:A_SHARED_SECRET]",
+          ],
+        },
+      },
+    });
+    assert.deepEqual(await hook({ tool_response: { stdout: "ordinary-value" } }), { continue: true });
+  }
+});
+
+test("Claude SDK requests summarized adaptive thinking without replacing effort", async () => {
+  let queryParams = null;
+  const sdk = {
+    query(params) {
+      queryParams = params;
+      return queryObject(async function* () {
+        yield { type: "result", session_id: params.options.sessionId, uuid: "u1", subtype: "success", is_error: false, result: "done" };
+      });
+    },
+  };
+  const client = new ClaudeSdkClient({ sdk });
+  await client.start();
+  const session = await client.createSession({ sessionId: "55555555-5555-4555-8555-555555555555" });
+  const activity = [];
+  client.on("activity", message => activity.push(message));
+
+  await client.sendMessage(session.id, { text: "explain the change", effort: "low" });
+  await untilTurnCompleted(activity);
+
+  assert.equal(queryParams.options.effort, "low");
+  assert.deepEqual(queryParams.options.thinking, { type: "adaptive", display: "summarized" });
+  assert.deepEqual(queryParams.options.allowedTools, ["Glob", "Grep"]);
+  assert.equal(queryParams.options.mcpServers, undefined);
+  assert.equal(typeof queryParams.options.canUseTool, "function");
+});
+
+test("Claude SDK sends ordered multimodal user messages on new and resumed Sessions", async () => {
+  const received = [];
+  const options = [];
+  const sdk = {
+    query(params) {
+      options.push(params.options);
+      return queryObject(async function* () {
+        const messages = [];
+        for await (const message of params.prompt) messages.push(message);
+        received.push(messages);
+        yield { type: "result", session_id: params.options.sessionId ?? params.options.resume, uuid: "u1", subtype: "success", is_error: false, result: "done" };
+      });
+    },
+  };
+  const client = new ClaudeSdkClient({ sdk });
+  await client.start();
+  const session = await client.createSession({ sessionId: "66666666-6666-4666-8666-666666666666" });
+  const activity = [];
+  client.on("activity", message => activity.push(message));
+
+  await client.sendMessage(session.id, { content: [
+    { type: "image", mediaType: "image/png", data: "AQID" },
+    { type: "text", text: "first image" },
+  ] });
+  await untilTurnCount(activity, 1);
+  await client.sendMessage(session.id, { content: [
+    { type: "text", text: "second image" },
+    { type: "image", mediaType: "image/jpeg", data: "BAUG" },
+  ] });
+  await untilTurnCount(activity, 2);
+
+  assert.equal(options[0].sessionId, session.id);
+  assert.equal(options[0].resume, undefined);
+  assert.equal(options[1].sessionId, undefined);
+  assert.equal(options[1].resume, session.id);
+  assert.deepEqual(options.map(option => option.allowedTools), [
+    ["Glob", "Grep"],
+    ["Glob", "Grep"],
+  ]);
+  assert.deepEqual(received, [
+    [{
+      type: "user",
+      message: { role: "user", content: [
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "AQID" } },
+        { type: "text", text: "first image" },
+      ] },
+      parent_tool_use_id: null,
+    }],
+    [{
+      type: "user",
+      message: { role: "user", content: [
+        { type: "text", text: "second image" },
+        { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "BAUG" } },
+      ] },
+      parent_tool_use_id: null,
+    }],
+  ]);
+});
+
+test("Claude SDK forwards local plugins on new and resumed queries without sharing mutable input", async () => {
+  const observed = [];
+  const sdk = {
+    query(params) {
+      observed.push(params.options);
+      return queryObject(async function* () {
+        yield {
+          type: "result",
+          session_id: params.options.sessionId ?? params.options.resume,
+          uuid: `result-${observed.length}`,
+          subtype: "success",
+          is_error: false,
+          result: "done",
+        };
+      });
+    },
+  };
+  const client = new ClaudeSdkClient({ sdk });
+  await client.start();
+  const plugins = [{ type: "local", path: "/plugins/fixture", skipMcpDiscovery: false }];
+  const session = await client.createSession({
+    sessionId: "12121212-1212-4212-8212-121212121212",
+    plugins,
+  });
+  plugins[0].path = "/plugins/mutated-after-create";
+  const activity = [];
+  client.on("activity", message => activity.push(message));
+
+  await client.sendMessage(session.id, { text: "first" });
+  await untilTurnCount(activity, 1);
+  await client.sendMessage(session.id, { text: "second" });
+  await untilTurnCount(activity, 2);
+
+  const expected = [{ type: "local", path: "/plugins/fixture", skipMcpDiscovery: false }];
+  assert.deepEqual(observed[0].plugins, expected);
+  assert.deepEqual(observed[1].plugins, expected);
+  assert.equal(observed[0].sessionId, session.id);
+  assert.equal(observed[1].resume, session.id);
+});
+
+test("Claude SDK omits absent plugins and rejects malformed entries before query", async () => {
+  let queries = 0;
+  let options;
+  const sdk = {
+    query(params) {
+      queries += 1;
+      options = params.options;
+      return queryObject(async function* () {
+        yield { type: "result", session_id: params.options.sessionId, uuid: "result", subtype: "success", is_error: false, result: "done" };
+      });
+    },
+  };
+  const client = new ClaudeSdkClient({ sdk });
+  await client.start();
+  const session = await client.createSession({ sessionId: "13131313-1313-4313-8313-131313131313" });
+  const activity = [];
+  client.on("activity", message => activity.push(message));
+  await client.sendMessage(session.id, { text: "unchanged default" });
+  await untilTurnCompleted(activity);
+
+  assert.equal(Object.hasOwn(options, "plugins"), false);
+  await assert.rejects(
+    client.createSession({ plugins: [{ type: "local", path: " " }] }),
+    /path must be a non-empty string/,
+  );
+  await assert.rejects(
+    client.sendMessage(session.id, { text: "inject", plugins: [{ type: "local", path: "/plugins/injected" }] }),
+    /must be configured when the Session is created or resumed/,
+  );
+  assert.equal(queries, 1);
+});
+
+test("Claude SDK rejects invalid image content before query()", async () => {
+  let queries = 0;
+  const client = new ClaudeSdkClient({ sdk: {
+    query() {
+      queries += 1;
+      throw new Error("must not run");
+    },
+  } });
+  await client.start();
+  const session = await client.createSession({ sessionId: "77777777-7777-4777-8777-777777777777" });
+
+  await assert.rejects(client.sendMessage(session.id, { content: [
+    { type: "image", mediaType: "image/svg+xml", data: "PHN2Zz4=" },
+  ] }), error => error.code === "CLAUDE_IMAGE_INPUT_INVALID");
+  assert.equal(queries, 0);
+});
+
+test("Claude SDK models advertise image input", async () => {
+  const client = new ClaudeSdkClient({ sdk: { query() {} } });
+  await client.start();
+  const models = await client.listModels();
+  assert.equal(models.length > 0, true);
+  assert.equal(models.every(model => JSON.stringify(model.inputModalities) === JSON.stringify(["text", "image"])), true);
+});
+
+test("Claude SDK client pauses on canUseTool and resumes after Relay approval", async () => {
+  let queryParams = null;
+  const sdk = {
+    query(params) {
+      queryParams = params;
+      return queryObject(async function* () {
+        yield { type: "assistant", session_id: params.options.sessionId, uuid: "u1", parent_tool_use_id: null, message: {
+          id: "msg-1",
+          role: "assistant",
+          model: "sonnet",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: {},
+          content: [{ type: "tool_use", id: "tool-1", name: "Write", input: { file_path: "probe.txt", content: "ok" } }],
+        } };
+        const allowed = await params.options.canUseTool("Write", { file_path: "probe.txt", content: "ok" }, {
+          requestId: "permission-1",
+          toolUseID: "tool-1",
+          title: "Claude wants to write probe.txt",
+          signal: new AbortController().signal,
+        });
+        yield { type: "user", session_id: params.options.sessionId, uuid: "u2", parent_tool_use_id: null, message: {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "tool-1", content: JSON.stringify(allowed), is_error: false }],
+        } };
+        yield { type: "stream_event", session_id: params.options.sessionId, uuid: "u3", parent_tool_use_id: null, event: {
+          type: "message_start",
+          message: { id: "msg-2" },
+        } };
+        yield { type: "stream_event", session_id: params.options.sessionId, uuid: "u4", parent_tool_use_id: null, event: {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "thinking_delta", thinking: "checked workspace" },
+        } };
+        yield { type: "assistant", session_id: params.options.sessionId, uuid: "u5", parent_tool_use_id: null, message: {
+          id: "msg-2",
+          role: "assistant",
+          model: "sonnet",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: {},
+          content: [{ type: "thinking", thinking: "checked workspace" }],
+        } };
+        yield { type: "stream_event", session_id: params.options.sessionId, uuid: "u6", parent_tool_use_id: null, event: {
+          type: "content_block_delta",
+          index: 1,
+          delta: { type: "text_delta", text: "done" },
+        } };
+        yield { type: "assistant", session_id: params.options.sessionId, uuid: "u7", parent_tool_use_id: null, message: {
+          id: "msg-2",
+          role: "assistant",
+          model: "sonnet",
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: {},
+          content: [{ type: "text", text: "done" }],
+        } };
+        yield { type: "result", session_id: params.options.sessionId, uuid: "u8", subtype: "success", is_error: false, result: "done" };
+      });
+    },
+  };
+  const client = new ClaudeSdkClient({ sdk });
+  await client.start();
+  const session = await client.createSession({ sessionId: "11111111-1111-4111-8111-111111111111", cwd: "/workspace/relay" });
+  const requests = [];
+  const activity = [];
+  client.on("request", request => {
+    requests.push(request);
+    client.resolveRequest(request.id, { action: "accept", updatedInput: request.params.input });
+  });
+  client.on("activity", message => activity.push(message));
+  await client.sendMessage(session.id, { text: "write a file", model: "sonnet", effort: "low" });
+  await untilTurnCompleted(activity);
+
+  assert.equal(queryParams.options.sessionId, session.id);
+  assert.equal(queryParams.options.resume, undefined);
+  assert.equal(queryParams.options.permissionMode, "default");
+  assert.equal(requests[0].method, "tool/requestApproval");
+  assert.equal(requests[0].params.toolName, "Write");
+  assert.deepEqual(activity.map(message => message.method), [
+    "item/started",
+    "item/completed",
+    "item/reasoning/summaryTextDelta",
+    "item/agentMessage/delta",
+    "turn/completed",
+  ]);
+  assert.equal(activity.find(message => message.method === "item/reasoning/summaryTextDelta").params.delta, "checked workspace");
+  assert.equal(activity.filter(message => message.method === "item/reasoning/summaryTextDelta").length, 1);
+  assert.equal(activity.filter(message => message.method === "item/agentMessage/delta").length, 1);
+});
+
+test("Claude SDK client maps Relay denial back to canUseTool", async () => {
+  let permissionResult = null;
+  const sdk = {
+    query(params) {
+      return queryObject(async function* () {
+        permissionResult = await params.options.canUseTool("Bash", { command: "rm -rf tmp" }, {
+          requestId: "permission-2",
+          toolUseID: "tool-2",
+          signal: new AbortController().signal,
+        });
+        yield { type: "result", session_id: params.options.sessionId, uuid: "u1", subtype: "success", is_error: false, result: "blocked" };
+      });
+    },
+  };
+  const client = new ClaudeSdkClient({ sdk });
+  await client.start();
+  const session = await client.createSession({ sessionId: "22222222-2222-4222-8222-222222222222" });
+  client.on("request", request => client.resolveRequest(request.id, { action: "decline", message: "No thanks" }));
+  const activity = [];
+  client.on("activity", message => activity.push(message));
+  await client.sendMessage(session.id, { text: "remove tmp" });
+  await untilTurnCompleted(activity);
+
+  assert.deepEqual(permissionResult, { behavior: "deny", message: "No thanks" });
+});
+
+test("Claude SDK maps generic DSH schemas to an in-process MCP server", async () => {
+  let queryParams = null;
+  let serverOptions = null;
+  const calls = [];
+  const sdk = {
+    createSdkMcpServer(options) {
+      serverOptions = options;
+      return { type: "sdk", name: options.name };
+    },
+    tool(name, description, inputSchema, handler) {
+      return { name, description, inputSchema, handler };
+    },
+    query(params) {
+      queryParams = params;
+      return queryObject(async function* () {
+        yield { type: "result", session_id: params.options.sessionId, uuid: "u1", subtype: "success", is_error: false, result: "done" };
+      });
+    },
+  };
+  const client = new ClaudeSdkClient({ sdk });
+  await client.start();
+  const session = await client.createSession({ sessionId: "44444444-4444-4444-8444-444444444444" });
+  const activity = [];
+  client.on("activity", message => activity.push(message));
+  await client.sendMessage(session.id, {
+    text: "use the probe",
+    dshTools: [{
+      name: "cross_plugin_probe",
+      description: "Probe a separately installed DSH plugin.",
+      parameters: {
+        type: "object",
+        properties: { value: { type: "string" }, count: { type: "integer" } },
+        required: ["value"],
+      },
+    }, {
+      name: "second_probe",
+      description: "Prove that the bridge preserves every contributed tool.",
+      parameters: { type: "object", properties: {} },
+    }],
+    async executeDshTool(input) {
+      calls.push(input);
+      return { isError: false, content: [{ type: "text", text: "probe complete" }] };
+    },
+  });
+  await untilTurnCompleted(activity);
+
+  assert.deepEqual(Object.keys(queryParams.options.mcpServers), ["dsh"]);
+  assert.deepEqual(queryParams.options.allowedTools, [
+    "Glob",
+    "Grep",
+    "mcp__dsh__cross_plugin_probe",
+    "mcp__dsh__second_probe",
+  ]);
+  assert.deepEqual(serverOptions.tools.map(tool => tool.name), ["cross_plugin_probe", "second_probe"]);
+  assert.equal(serverOptions.tools[0].name, "cross_plugin_probe");
+  assert.equal(serverOptions.tools[0].inputSchema.value.isOptional(), false);
+  assert.equal(serverOptions.tools[0].inputSchema.count.isOptional(), true);
+  const result = await serverOptions.tools[0].handler({ value: "ok" }, { signal: new AbortController().signal });
+  assert.deepEqual(calls[0].arguments, { value: "ok" });
+  assert.equal(result.isError, false);
+  assert.deepEqual(result.content, [{ type: "text", text: "probe complete" }]);
+});
+
+test("Claude SDK preserves structured tool-result images without leaking Base64 into activity", async () => {
+  const sdk = {
+    query(params) {
+      return queryObject(async function* () {
+        yield { type: "assistant", session_id: params.options.sessionId, uuid: "u1", message: {
+          id: "msg-tool",
+          role: "assistant",
+          content: [{ type: "tool_use", id: "tool-image", name: "make_image", input: { prompt: "sunrise" } }],
+        } };
+        yield { type: "user", session_id: params.options.sessionId, uuid: "u2", message: {
+          role: "user",
+          content: [{
+            type: "tool_result",
+            tool_use_id: "tool-image",
+            content: [{
+              type: "image",
+              source: { type: "base64", media_type: "image/png", data: "AQID" },
+            }],
+            is_error: false,
+          }],
+        } };
+        yield { type: "assistant", session_id: params.options.sessionId, uuid: "u3", message: {
+          id: "msg-final",
+          role: "assistant",
+          content: [{ type: "text", text: "Done." }],
+        } };
+        yield { type: "result", session_id: params.options.sessionId, uuid: "u4", subtype: "success", is_error: false, result: "done" };
+      });
+    },
+  };
+  const client = new ClaudeSdkClient({ sdk });
+  await client.start();
+  const session = await client.createSession({ sessionId: "88888888-8888-4888-8888-888888888888" });
+  const activity = [];
+  client.on("activity", message => activity.push(message));
+
+  await client.sendMessage(session.id, { text: "make an image" });
+  await untilTurnCompleted(activity);
+  const completed = activity.find(message => (
+    message.method === "item/completed" && message.params.item.id === "tool-image"
+  )).params.item;
+
+  assert.equal(completed.name, "make_image");
+  assert.deepEqual(completed.input, { prompt: "sunrise" });
+  assert.deepEqual(completed.images, [{ mediaType: "image/png", data: "AQID", name: undefined }]);
+  assert.deepEqual(completed.output, [{ type: "image", mediaType: "image/png", omitted: true }]);
+  assert.equal(JSON.stringify(completed.output).includes("AQID"), false);
+});
+
+test("the in-process DSH MCP bridge returns image bytes as an MCP image result", async () => {
+  let serverOptions = null;
+  const sdk = {
+    createSdkMcpServer(options) {
+      serverOptions = options;
+      return { type: "sdk", name: options.name };
+    },
+    tool(name, description, inputSchema, handler) {
+      return { name, description, inputSchema, handler };
+    },
+    query(params) {
+      return queryObject(async function* () {
+        yield { type: "result", session_id: params.options.sessionId, uuid: "u1", subtype: "success", is_error: false, result: "done" };
+      });
+    },
+  };
+  const client = new ClaudeSdkClient({ sdk });
+  await client.start();
+  const session = await client.createSession({ sessionId: "99999999-9999-4999-8999-999999999999" });
+  const activity = [];
+  client.on("activity", message => activity.push(message));
+
+  await client.sendMessage(session.id, {
+    text: "make an image",
+    dshTools: [{ name: "make_image", description: "Make image", parameters: { type: "object", properties: {} } }],
+    async executeDshTool() {
+      return { content: [{ type: "image", mediaType: "image/png", data: "AQID" }], isError: false };
+    },
+  });
+  await untilTurnCompleted(activity);
+
+  const result = await serverOptions.tools[0].handler({}, { signal: new AbortController().signal });
+  assert.deepEqual(result, {
+    content: [{ type: "image", data: "AQID", mimeType: "image/png" }],
+    isError: false,
+  });
+});
+
+test("Claude SDK client interrupts and aborts an in-progress query", async () => {
+  let queryParams = null;
+  let interrupted = 0;
+  let closed = 0;
+  let releaseNext;
+  const sdk = {
+    query(params) {
+      queryParams = params;
+      return {
+        async next() { return new Promise(resolve => { releaseNext = resolve; }); },
+        async return() { return { done: true }; },
+        [Symbol.asyncIterator]() { return this; },
+        async interrupt() { interrupted += 1; },
+        close() { closed += 1; releaseNext?.({ done: true }); },
+      };
+    },
+  };
+  const client = new ClaudeSdkClient({ sdk });
+  await client.start();
+  const session = await client.createSession({ sessionId: "33333333-3333-4333-8333-333333333333" });
+  const turn = await client.sendMessage(session.id, { text: "keep working" });
+
+  await client.interruptTurn(session.id, turn.id);
+
+  assert.equal(interrupted, 1);
+  assert.equal(closed, 1);
+  assert.equal(queryParams.options.abortController.signal.aborted, true);
+});
+
+function queryObject(factory) {
+  const iterator = factory();
+  return {
+    async next() { return iterator.next(); },
+    async return() { return iterator.return?.() ?? { done: true }; },
+    async throw(error) { return iterator.throw?.(error) ?? Promise.reject(error); },
+    [Symbol.asyncIterator]() { return this; },
+    async interrupt() { return { still_queued: [] }; },
+    close() {},
+  };
+}
+
+async function untilTurnCompleted(activity) {
+  const deadline = Date.now() + 1_000;
+  while (!activity.some(message => message.method === "turn/completed")) {
+    if (Date.now() > deadline) throw new Error("timed out waiting for turn/completed");
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+}
+
+async function untilTurnCount(activity, count) {
+  const deadline = Date.now() + 1_000;
+  while (activity.filter(message => message.method === "turn/completed").length < count) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${count} completed turns`);
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+}

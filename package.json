@@ -1,0 +1,133 @@
+{
+  "name": "relay-dsh-plugin-claude",
+  "version": "0.2.5-rc.1-worka-public.1",
+  "description": "Claude Code integration plugin for DeepSeek Harness, providing native Claude conversations powered by the Claude Agent SDK, with model selection, approvals, questions, tools, and session continuation.",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/host-plugin.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kllilizxc/relay-dsh-plugin-claude.git"
+  },
+  "homepage": "https://github.com/kllilizxc/relay-dsh-plugin-claude#readme",
+  "bugs": {
+    "url": "https://github.com/kllilizxc/relay-dsh-plugin-claude/issues"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "latest"
+  },
+  "scripts": {
+    "prepare:dsh": "bash scripts/link-dsh-development-peers.sh",
+    "prebuild": "npm run prepare:dsh && node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\"",
+    "build": "tsdown --config tsdown.config.ts",
+    "postbuild": "node normalize-build.mjs",
+    "pretypecheck": "npm run prepare:dsh",
+    "typecheck": "tsc -p tsconfig.json",
+    "test:unit": "node --test test/*.test.mjs",
+    "test:component": "vitest run test/*.spec.tsx",
+    "test": "npm run prepare:dsh && npm run test:unit && npm run test:component",
+    "verify": "npm run typecheck && npm test && npm run build"
+  },
+  "exports": {
+    ".": "./lib/host-plugin.js",
+    "./client": "./lib/client.js",
+    "./typert": "./lib/typert.host.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "README.zh.md",
+    "docs/images",
+    "docs/spec/claude-local-plugins.md",
+    "docs/spec/claude-native-session-import.md",
+    "docs/spec/claude-search-tools.md",
+    "docs/spec/claude-tool-output-redaction.md",
+    "cordis.patch.yml",
+    "presets",
+    "lib/client.js",
+    "lib/host-plugin.js",
+    "lib/typert.host.js",
+    "docs/dsh-0.1.2-alpha.3.md",
+    "dsh-compat.mjs",
+    "dsh-client-compat.mjs",
+    "dsh-client-compat.d.mts"
+  ],
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-theme",
+        "relay-dsh-plugin-session-import",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-api-workspace-controller",
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-ui-model-selection"
+      ],
+      "platform": "web"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.241",
+    "@anthropic-ai/sdk": "^0.120.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "relay-dsh-plugin-session-import": "https://github.com/kllilizxc/relay-dsh-plugin-session-import/releases/download/v0.2.4-rc.1-worka-public.2/19d23534cffb0eb6f3e0b5f7580cdbf0d846dc79337383f080e52c8d01b96fa4.tgz",
+    "sharp": "^0.35.3",
+    "zod": "4.4.3"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.1-rc.2",
+    "react": "19.3.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-session": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-typert-protocol": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "jsdom": "^29.1.1",
+    "lightningcss": "1.32.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "tsdown": "0.22.2",
+    "typescript": "6.0.3",
+    "vitest": "^4.1.8"
+  },
+  "bundleDependencies": [
+    "relay-dsh-plugin-session-import"
+  ]
+}
