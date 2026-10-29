@@ -1,6 +1,6 @@
 {
   "name": "relay-dsh-plugin-claude",
-  "version": "0.2.5-rc.1-worka-public.1",
+  "version": "0.2.5-rc.1-worka-public.2",
   "description": "Claude Code integration plugin for DeepSeek Harness, providing native Claude conversations powered by the Claude Agent SDK, with model selection, approvals, questions, tools, and session continuation.",
   "keywords": [
     "dsh-plugin",
@@ -87,7 +87,7 @@
     }
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.241",
+    "@anthropic-ai/claude-agent-sdk": "0.3.278",
     "@anthropic-ai/sdk": "^0.120.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "relay-dsh-plugin-session-import": "https://github.com/kllilizxc/relay-dsh-plugin-session-import/releases/download/v0.2.4-rc.1-worka-public.2/19d23534cffb0eb6f3e0b5f7580cdbf0d846dc79337383f080e52c8d01b96fa4.tgz",
