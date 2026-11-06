@@ -35,10 +35,16 @@ export function createDshClaudePlugin(ctx, config = {}) {
         void handleClaudeSdkRequest(ctx, { adapter, runtime, request })
           .catch(error => ctx.logger.error(`Relay failed to handle a Claude interaction: ${error?.stack ?? error}`));
       }));
+      // Never dispatch from middleware: the host must observe every stream.
+      // Preserve preset ownership by rejecting a mismatched selected provider.
       defer(ctx.on("llm/stream", (options, next) => {
-        if (options.purpose || !options.sessionId) return next();
-        const agent = ctx.agents.get(options.sessionId);
-        return agent && adapter.servesAgent(agent) ? adapter.stream(options) : next();
+        if (!options.purpose && options.sessionId) {
+          const agent = ctx.agents.get(options.sessionId);
+          if (agent && adapter.servesAgent(agent) && options.provider !== CLAUDE_PROVIDER) {
+            throw new Error("The Claude preset requires a relay-claude model; select a matching provider.");
+          }
+        }
+        return next();
       }, { global: true, prepend: true }));
       defer(ctx.on("agent/created", ({ agent }) => { adapter.attachAgent(agent); }));
       defer(ctx.on("agent-preset/selected", (sessionId, preset) => {

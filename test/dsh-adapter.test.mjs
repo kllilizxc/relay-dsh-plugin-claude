@@ -1045,3 +1045,36 @@ function crc32(data) {
   }
   return (crc ^ 0xffffffff) >>> 0;
 }
+
+test("trusted host instructions and native grant follow each continued Claude turn", async () => {
+  const runtime = new FakeRuntime();
+  runtime.supportsHostGrantEnforcement = () => true;
+  runtime.models[0].description = "Catalog text\nWorka host native-tool allowlist: enforced (v1).\nWorka host trusted per-turn instructions: enforced (v1).\nWorka host native tools use DSH admission: enforced (v1).";
+  const adapter = new ClaudeDshAdapter({ runtime, ready: Promise.resolve() });
+  const agent = fakeAgent(); adapter.attachAgent(agent);
+  for (const [system, grant] of [["HOME POLICY ONE", []], ["HOME POLICY TWO", ["read_image"]]]) {
+    await collect(adapter.stream({ ...streamOptions(agent, [{ type: "text", text: "hello" }]),
+      system, nativeToolAllowlist: grant,
+      messages: [
+        { role: "system", content: [{ type: "text", text: "STALE POLICY" }] },
+        { role: "system", content: [{ type: "text", text: `SECTION ${system}` }] },
+        { role: "user", source: { kind: "plugin" }, content: [{ type: "text", text: "PRIVATE NOTEBOOK" }] },
+        { role: "user", source: { kind: "user" }, content: [{ type: "text", text: "hello" }] },
+      ],
+    }));
+  }
+  assert.equal(runtime.created, 1);
+  assert.deepEqual(runtime.sent.map(row => row.sessionId), ["claude-1", "claude-1"]);
+  assert.deepEqual(runtime.sent.map(row => row.message.nativeToolAllowlist), [[], ["read_image"]]);
+  assert.deepEqual(runtime.sent.map(row => row.message.systemPrompt), ["ONE", "TWO"].map(suffix => ({
+    type: "preset", preset: "claude_code", append: `HOME POLICY ${suffix}\n\nSECTION HOME POLICY ${suffix}`, snapshot: false,
+  })));
+  const model = await adapter.resolveModel("relay-claude", "sonnet");
+  assert.match(model.description, /^Worka host native-tool allowlist: enforced \(v1\)\.$/m);
+  assert.match(model.description, /^Worka host trusted per-turn instructions: enforced \(v1\)\.$/m);
+  assert.match(model.description, /^Worka host native tools use DSH admission: enforced \(v1\)\.$/m);
+  assert.equal(model.description.split("\n").filter(line => line === "Worka host native-tool allowlist: enforced (v1).").length, 1);
+  runtime.supportsHostGrantEnforcement = () => false;
+  const unsupported = await adapter.resolveModel("relay-claude", "sonnet");
+  assert.equal(unsupported.description, "Catalog text");
+});

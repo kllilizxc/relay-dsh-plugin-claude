@@ -80,3 +80,20 @@ The following layers are required:
 
 The E2E record must identify the DSH version and plugin commit and retain
 screenshots of both pending approvals and both completed conversations.
+
+## Host native grants and trusted turn instructions
+
+For restricted turns the host's native allowlist limits the DSH tool schemas
+exposed through the in-process MCP bridge. Claude built-in tools are disabled,
+external MCP configuration, plugins and user/project settings are excluded,
+and a pre-tool hook and permission callback deny any tool outside that bridge.
+Every exposed DSH tool executes through the owning agent's DSH tool runtime,
+including its host authorization and file-intent checks. Malformed allowlists fail before dispatch. The CLI fallback rejects restricted turns because it
+cannot provide this enforcement.
+
+Ordinary turns forward the current host system text and system-role content as
+Claude system-prompt instructions, separate from user-role reference data. SDK
+prompt snapshotting is disabled for these turns so changes apply to a resumed
+session. The CLI fallback forwards this policy with prompt snapshotting disabled; an
+older CLI that lacks the snapshot flag fails rather than using stale policy.
+Auxiliary turns use an empty native grant by default.

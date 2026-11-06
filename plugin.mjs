@@ -38,6 +38,7 @@ function executionCapability(runtime, ready) {
   return Object.freeze({
     whenReady: () => ready,
     listModels: () => structuredClone(runtime.models),
+    supportsHostGrantEnforcement: () => runtime.supportsHostGrantEnforcement(),
     supportsSessionImport: () => runtime.supportsSessionImport(),
     listWorkspaceSessions: runtime.listWorkspaceSessions.bind(runtime),
     readSession: runtime.readSession.bind(runtime),
@@ -79,7 +80,7 @@ function createClaudeCliClient(config) {
   });
 }
 
-class FallbackClaudeClient extends ClaudeCliClient {
+export class FallbackClaudeClient extends ClaudeCliClient {
   constructor({ primary, fallback }) {
     super();
     this.primary = primary;
@@ -103,6 +104,7 @@ class FallbackClaudeClient extends ClaudeCliClient {
   }
 
   listModels(...args) { return this.active.listModels(...args); }
+  supportsHostGrantEnforcement(...args) { return this.active.supportsHostGrantEnforcement?.(...args) === true; }
   supportsSessionImport(...args) { return this.active.supportsSessionImport?.(...args) === true; }
   listWorkspaceSessions(...args) { return this.active.listWorkspaceSessions?.(...args); }
   readSession(...args) { return this.active.readSession?.(...args); }

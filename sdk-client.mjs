@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { z } from "zod";
 
 import { normalizeClaudePlugins } from "./claude-plugin-config.mjs";
+import { nativeToolPolicy } from "./native-tool-policy.mjs";
 
 const DEFAULT_MODELS = [
   { id: "sonnet", displayName: "Claude Sonnet", isDefault: true, defaultReasoningEffort: "medium", supportedReasoningEfforts: reasoningEfforts(), inputModalities: ["text", "image"] },
@@ -38,6 +39,8 @@ export class ClaudeSdkClient extends EventEmitter {
   async listModels() {
     return DEFAULT_MODELS;
   }
+
+  supportsHostGrantEnforcement() { return true; }
 
   supportsSessionImport() {
     return typeof this.sdk?.listSessions === "function"
@@ -149,16 +152,24 @@ export class ClaudeSdkClient extends EventEmitter {
   }
 
   async queryOptions(session, message, abortController) {
-    const plugins = normalizeClaudePlugins(session.config?.plugins);
+    const grant = nativeToolPolicy(message.nativeToolAllowlist);
+    const plugins = grant ? [] : normalizeClaudePlugins(session.config?.plugins);
     const cwd = message.cwd ?? session.cwd ?? process.cwd();
-    const settingSources = message.settingSources ?? session.config?.settingSources ?? ["user", "project", "local"];
+    const settingSources = grant ? [] : (message.settingSources ?? session.config?.settingSources ?? ["user", "project", "local"]);
     const dshOptions = dshMcpOptions(
       this.sdk,
-      message.dshTools,
+      grant ? (message.dshTools ?? []).filter(tool => tool.name === "workbench" || grant.has(tool.name)) : message.dshTools,
       message.executeDshTool,
       abortController.signal,
     );
+    const dshAllowed = dshOptions.allowedTools ?? [];
+    const nativeBuiltins = grant ? [] : CLAUDE_SEARCH_TOOLS;
+    const permitted = new Set([...nativeBuiltins, ...dshAllowed]);
     const redactions = await sensitiveEnvironmentRedactions(this.sdk, cwd, settingSources);
+    const hooks = redactions.length === 0 ? {} : sensitiveOutputHooks(redactions);
+    if (grant) hooks.PreToolUse = [{ hooks: [async input => permitted.has(input.tool_name)
+      ? { continue: true }
+      : { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "Native tool is not permitted by the host grant." } }] }];
     return {
       abortController,
       cwd,
@@ -168,17 +179,20 @@ export class ClaudeSdkClient extends EventEmitter {
       // reasoning projection below receives a signature and a token count and has nothing to show.
       // Effort still decides how much thinking happens; display decides whether it is readable.
       thinking: { type: "adaptive", display: "summarized" },
-      permissionMode: sdkPermissionMode(message),
+      permissionMode: grant ? "default" : sdkPermissionMode(message),
       settingSources,
       systemPrompt: message.systemPrompt ?? session.config?.systemPrompt,
       pathToClaudeCodeExecutable: this.pathToClaudeCodeExecutable,
       includePartialMessages: true,
       ...(plugins === undefined ? {} : { plugins }),
       ...(session.created ? { resume: session.id } : { sessionId: session.id }),
-      canUseTool: (toolName, input, options) => this.requestPermission(session.id, toolName, input, options),
-      ...(redactions.length === 0 ? {} : { hooks: sensitiveOutputHooks(redactions) }),
+      canUseTool: (toolName, input, options) => grant && !permitted.has(toolName)
+        ? Promise.resolve({ behavior: "deny", message: "Native tool is not permitted by the host grant." })
+        : this.requestPermission(session.id, toolName, input, options),
+      ...(Object.keys(hooks).length ? { hooks } : {}),
+      ...(grant ? { tools: nativeBuiltins, strictMcpConfig: true } : {}),
       ...dshOptions,
-      allowedTools: [...CLAUDE_SEARCH_TOOLS, ...(dshOptions.allowedTools ?? [])],
+      allowedTools: [...nativeBuiltins, ...dshAllowed],
     };
   }
 

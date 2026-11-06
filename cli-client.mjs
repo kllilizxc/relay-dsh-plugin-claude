@@ -82,6 +82,7 @@ export class ClaudeCliClient extends EventEmitter {
   }
 
   spawnTurn(session, turnId, message) {
+    if (message.nativeToolAllowlist !== undefined) throw new Error("Restricted native tools require the Claude Agent SDK backend.");
     const settingSourceArgs = settingSourceArguments(message.settingSources ?? session.config?.settingSources);
     const systemPromptArgs = systemPromptArguments(message.systemPrompt ?? session.config?.systemPrompt);
     const cliArgs = [
@@ -247,5 +248,13 @@ function settingSourceArguments(value) {
 
 function systemPromptArguments(value) {
   if (typeof value === "string" && value.trim()) return ["--system-prompt", value];
-  return [];
+  if (!value || typeof value !== "object") return [];
+  const args = value.snapshot === false ? ["--system-prompt-snapshot", "off"] : [];
+  if (value.type === "preset" && value.preset === "claude_code" && typeof value.append === "string" && value.append.trim()) {
+    args.push("--append-system-prompt", value.append);
+  } else if (value.type === "custom") {
+    const text = Array.isArray(value.prompt) ? value.prompt.join("\n\n") : value.prompt;
+    if (typeof text === "string" && text.trim()) args.push("--system-prompt", text);
+  }
+  return args;
 }

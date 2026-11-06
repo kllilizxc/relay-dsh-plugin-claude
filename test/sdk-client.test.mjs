@@ -668,3 +668,41 @@ async function untilTurnCount(activity, count) {
     await new Promise(resolve => setTimeout(resolve, 0));
   }
 }
+
+test("all native read subsets expose only corresponding host DSH tools and deny native calls", async () => {
+  const sdk = { tool: (name, description, schema, execute) => ({ name, description, schema, execute }), createSdkMcpServer: value => value };
+  const client = new ClaudeSdkClient({ sdk });
+  const names = ["read", "read_image", "glob", "grep"];
+  const session = { id: "fixture", cwd: "/tmp", created: false, config: { plugins: [{ type: "local", path: "/tmp/plugin" }] } };
+  for (let mask = 0; mask < 16; mask++) {
+    const grant = names.filter((_, index) => mask & (1 << index));
+    const executed = [];
+    const schemas = [...names, "write", "workbench"].map(name => ({ name, description: name, parameters: { type: "object", properties: {} } }));
+    const options = await client.queryOptions(session, { nativeToolAllowlist: grant, dshTools: schemas,
+      executeDshTool: async call => { executed.push(call.name); return { content: [{type:"text", text:"ok"}] }; },
+      sandbox: "danger-full-access" }, new AbortController());
+    assert.deepEqual(options.tools, []); assert.deepEqual(options.plugins, []); assert.deepEqual(options.settingSources, []);
+    assert.equal(options.strictMcpConfig, true); assert.equal(options.permissionMode, "default");
+    const expected = [...grant, "workbench"];
+    assert.deepEqual(options.mcpServers.dsh.tools.map(tool => tool.name), expected);
+    assert.deepEqual(options.allowedTools, expected.map(name => `mcp__dsh__${name}`));
+    const hook = options.hooks.PreToolUse[0].hooks[0];
+    for (const tool_name of ["Bash", "Write", "Edit", "Read", "Glob", "Grep", "Agent", "mcp__external__run", "mcp__dsh__write"]) {
+      assert.equal((await hook({ tool_name })).hookSpecificOutput?.permissionDecision, "deny", `${grant} ${tool_name}`);
+      assert.equal((await options.canUseTool(tool_name, {}, {})).behavior, "deny");
+    }
+    for (const tool of options.mcpServers.dsh.tools) {
+      assert.equal((await hook({tool_name:`mcp__dsh__${tool.name}`})).continue, true);
+      await tool.execute({}, {toolUseID:"id"});
+    }
+    assert.deepEqual(executed, expected);
+  }
+  const arbitrary = await client.queryOptions(session, { nativeToolAllowlist: ["shell", "custom"],
+    dshTools: ["shell", "custom", "write"].map(name => ({ name, parameters: { type: "object", properties: {} } })),
+    executeDshTool: async () => ({ content: [{ type: "text", text: "guarded" }] }) }, new AbortController());
+  assert.deepEqual(arbitrary.mcpServers.dsh.tools.map(tool => tool.name), ["shell", "custom"]);
+  assert.deepEqual(arbitrary.tools, []);
+  for (const invalid of [null, "read", [null], [""]]) {
+    await assert.rejects(client.queryOptions(session, { nativeToolAllowlist: invalid }, new AbortController()), /valid native tool allowlist/);
+  }
+});

@@ -1,4 +1,5 @@
 import { LlmAdapter } from "@deepseek-ai/dsh-llm";
+import { nativeToolPolicy } from "./native-tool-policy.mjs";
 import { sessionEvents } from "./dsh-compat.mjs";
 import {
   materializeDshToolImages,
@@ -9,6 +10,11 @@ export const CLAUDE_PRESET = "relay-claude";
 export const CLAUDE_PROVIDER = "relay-claude";
 export const CLAUDE_ACTIVITY_EVENT = "relay-claude/activity";
 const IMPORT_STATES = Object.freeze(["reserved", "session-created", "hydrated", "attached", "committed"]);
+const HOST_CAPABILITY_LINES = Object.freeze([
+  "Worka host native-tool allowlist: enforced (v1).",
+  "Worka host trusted per-turn instructions: enforced (v1).",
+  "Worka host native tools use DSH admission: enforced (v1).",
+]);
 
 export class ClaudeDshAdapter extends LlmAdapter {
   constructor({ runtime, ready, linkStore = null, attachments = null, logger = console }) {
@@ -59,6 +65,7 @@ export class ClaudeDshAdapter extends LlmAdapter {
       provider,
       id: model,
       name: info?.displayName ?? model,
+      description: hostCapabilityDescription(info?.description, this.runtime.supportsHostGrantEnforcement?.() === true),
       inputModalities: info?.inputModalities ?? ["text"],
       ...(Array.isArray(info?.supportedReasoningEfforts)
         ? {
@@ -223,6 +230,7 @@ export class ClaudeDshAdapter extends LlmAdapter {
   }
 
   async *stream(options) {
+    nativeToolPolicy(options.nativeToolAllowlist);
     if (options.purpose) {
       yield* this.streamAuxiliary(options);
       return;
@@ -277,7 +285,9 @@ export class ClaudeDshAdapter extends LlmAdapter {
 
     let turnId = null;
     try {
-      const started = await this.runtime.sendMessage(claudeSessionId, { text, content, ...config, dshTools, executeDshTool });
+      const started = await this.runtime.sendMessage(claudeSessionId, { text, content, ...config,
+        nativeToolAllowlist: options.nativeToolAllowlist, systemPrompt: turnSystemPrompt(config.systemPrompt, options),
+        dshTools, executeDshTool });
       turnId = started.id;
       const state = createStreamState({ structuredImages, structuredCallIds });
       let completedTurn = null;
@@ -359,6 +369,8 @@ export class ClaudeDshAdapter extends LlmAdapter {
     try {
       const started = await this.runtime.sendMessage(claudeSessionId, {
         text,
+        nativeToolAllowlist: options.nativeToolAllowlist ?? [],
+        systemPrompt: turnSystemPrompt(undefined, options),
         model: options.model,
         effort: options.reasoningEffort,
         sandbox: "read-only",
@@ -778,4 +790,22 @@ function effectivePreset(session) {
     if (event.type === "agent-preset/selected") return event.data.agentPreset;
   }
   return session.header.agentPreset;
+}
+
+function turnSystemPrompt(base, options) {
+  const latestSystem = (options.messages ?? []).findLast(message => message.role === "system");
+  const currentSystem = (latestSystem?.content ?? []).filter(block => block.type === "text").map(block => block.text).join("\n");
+  const context = [options.system, currentSystem].filter(text => typeof text === "string" && text.trim()).join("\n\n");
+  if (!context) return base;
+  if (base?.type === "preset" && base.preset === "claude_code") {
+    return { ...base, append: [base.append, context].filter(Boolean).join("\n\n") || undefined, snapshot: false };
+  }
+  const text = typeof base === "string" ? base : base?.type === "custom" ? base.prompt : undefined;
+  return { type: "custom", prompt: [text, context].filter(Boolean).join("\n\n"), snapshot: false };
+}
+
+function hostCapabilityDescription(description, supported) {
+  const lines = typeof description === "string" ? description.split(/\r?\n/)
+    .filter(line => !HOST_CAPABILITY_LINES.includes(line.trim())) : [];
+  return [...lines, ...(supported ? HOST_CAPABILITY_LINES : [])].filter(Boolean).join("\n") || undefined;
 }

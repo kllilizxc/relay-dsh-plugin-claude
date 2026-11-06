@@ -171,3 +171,29 @@ function restoreEnv(name, value) {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
 }
+
+test("CLI backend fails closed before spawning restricted turns", async () => {
+  const client = new ClaudeCliClient({ command: "/must-not-execute" });
+  const session = await client.createSession({ cwd: "/tmp" });
+  await assert.rejects(client.sendMessage(session.id, { text: "hello", nativeToolAllowlist: [] }), /require the Claude Agent SDK/);
+  assert.equal(client.processes.size, 0);
+});
+
+
+test("CLI forwards updated system text without prompt snapshots on resumed turns", async context => {
+  const directory = await mkdtemp(join(tmpdir(), "relay-claude-cli-policy-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const argsPath = join(directory, "args.json"), scriptPath = join(directory, "fake-claude.mjs");
+  await writeFile(scriptPath, `import { writeFileSync } from "node:fs"; writeFileSync(process.argv[2], JSON.stringify(process.argv.slice(3))); console.log(JSON.stringify({type:"result",result:"ok"}));`);
+  const client = new ClaudeCliClient({ command: process.execPath, args: [scriptPath, argsPath] });
+  const session = await client.createSession({ cwd: directory });
+  for (const policy of ["FIRST", "SECOND"]) {
+    const done = onceTurnCompleted(client);
+    await client.sendMessage(session.id, { text: "hello", systemPrompt: { type: "preset", preset: "claude_code", append: policy, snapshot: false } });
+    await done;
+    const args = JSON.parse(await readFile(argsPath, "utf8"));
+    assertFlag(args, "--append-system-prompt", policy);
+    assertFlag(args, "--system-prompt-snapshot", "off");
+    assertFlag(args, policy === "FIRST" ? "--session-id" : "--resume", session.id);
+  }
+});

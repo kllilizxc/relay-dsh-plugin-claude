@@ -108,6 +108,8 @@ export class ClaudeSessionRuntime extends EventEmitter {
     return publicSession(session);
   }
 
+  supportsHostGrantEnforcement() { return this.client.supportsHostGrantEnforcement?.() === true; }
+
   supportsSessionImport() {
     return this.client.supportsSessionImport?.() === true;
   }
